@@ -1,0 +1,1334 @@
+openapi: 3.1.0
+info:
+  title: Canonn API
+  version: 1.2.0
+  summary: Grounded answers from your own documents.
+  description: |
+    Canonn serves **canonn-r1**, a model fine-tuned for context faithfulness: it
+    answers from the documents you supply and says so when the answer is not there.
+    Each request is answered by one of four experts on the same base (default,
+    conflict, injection, absent): a trained router picks among the first three,
+    and a check on whether the data contains the answer can hand it to `absent`.
+    The choice is reported in `canonn.route`; when the router does not run, a
+    conflict check stands in.
+    Both report contradictions in `canonn.conflict`.
+
+    The API is **OpenAI-compatible**. Point any OpenAI SDK at
+    `https://api.canonn.ai/v1`, set your Canonn key, and existing code works
+    unchanged. Every example in this specification was run against
+    production on 28 September 2026.
+
+    ## Authentication
+
+    Every request carries a bearer key created in the
+    [dashboard](https://canonn.ai/dashboard/):
+
+    ```
+    Authorization: Bearer canonn-sk-...
+    ```
+
+    A key is shown once at creation and stored only as a hash. It cannot be
+    recovered, only revoked and replaced.
+
+    ## How to prompt it
+
+    Put the documents in the system message and the question in the user
+    message. No rulebook is needed: faithfulness is trained into the weights,
+    not instructed at runtime.
+
+    ```
+    system: Answer from the data below.
+
+            Data: Refunds are accepted within 45 days of purchase.
+    user:   What is the refund window?
+    ```
+
+    ## Pricing and limits
+
+    Usage is billed per token, $0.25 per 1M input tokens and $1 per 1M output
+    tokens, drawn from prepaid credits. New accounts get 100 free requests on
+    signup, no card; a successful referral adds 1,000 requests to both
+    accounts. Past that, without credits, the API answers `402`. Context
+    window 16,384 tokens, max output 4,096 tokens, 120 chat completions per
+    minute per key. Inference runs in Canada.
+
+    ## Errors
+
+    `/v1/chat/completions`, `/v1/models` and `/v1/files` (with their
+    sub-routes) return the OpenAI error object
+    `{"error": {"message", "type", "param", "code"}}`. `/v1/audits` returns
+    `{"error": "message"}`.
+
+    ## Versioning and deprecation
+
+    The stable API is namespaced under `/v1`. Breaking changes use a new major
+    path. See https://canonn.ai/developers/versioning/ for notice periods and
+    the response headers used for deprecations.
+  contact:
+    name: Canonn
+    email: hello@canonn.ai
+    url: https://canonn.ai
+  termsOfService: https://canonn.ai/legal/#terms
+  license:
+    name: Canonn Terms of Service
+    url: https://canonn.ai/legal/#terms
+servers:
+  - url: https://api.canonn.ai/v1
+    description: Production
+security:
+  - bearerAuth: []
+tags:
+  - name: Chat
+    description: Generating grounded answers.
+  - name: Files
+    description: Knowledge files that chat completions can ground on.
+  - name: Audits
+    description: Contradictions and out-of-date statements inside one knowledge file.
+  - name: Models
+    description: What this API serves.
+paths:
+  /chat/completions:
+    post:
+      tags:
+        - Chat
+      operationId: createChatCompletion
+      summary: Create a grounded completion
+      description: >
+        OpenAI-compatible chat completion. Set `stream: true` for server-sent
+        events; chunks arrive as `data: {...}` lines terminated by
+        `data: [DONE]`. The chunk that carries `finish_reason` also carries
+        `usage`; with `stream_options.include_usage` the usage comes instead in
+        a separate final chunk with empty `choices`.
+
+
+        Non-streamed responses carry a `canonn` object (route, conflict,
+        citations when grounded, AI-generated mark). A stream carries it as a
+        last `data: {"canonn": {...}}` event only when the request sets
+        `"canonn": true`.
+
+
+        Non-streamed generations longer than about 100 seconds can hit the
+        edge's first-byte timeout; use streaming for long outputs.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatCompletionRequest'
+            examples:
+              grounded:
+                summary: Answer from supplied data
+                value:
+                  model: canonn-r1
+                  messages:
+                    - role: system
+                      content: |-
+                        Answer from the data below.
+
+                        Data: Refund window: 45 days from purchase.
+                    - role: user
+                      content: How long do I have to request a refund?
+              absent:
+                summary: A question the data cannot answer
+                description: Canonn declines instead of inventing an answer.
+                value:
+                  model: canonn-r1
+                  messages:
+                    - role: system
+                      content: |-
+                        Answer from the data below.
+
+                        Data: Plan A costs 10 dollars per month.
+                    - role: user
+                      content: How much does Plan B cost?
+              files:
+                summary: Grounded on uploaded files
+                value:
+                  model: canonn-r1
+                  files:
+                    - file-2da93b04d430cc5e52d1ef9b
+                  messages:
+                    - role: user
+                      content: What does HarborPay charge per card transaction?
+              streaming:
+                summary: Streamed response
+                value:
+                  model: canonn-r1
+                  stream: true
+                  messages:
+                    - role: system
+                      content: |-
+                        Answer from the data below.
+
+                        Data: Support hours are 9am to 5pm on weekdays.
+                    - role: user
+                      content: Is support available on Saturday?
+      responses:
+        '200':
+          description: |
+            A completion. When `stream` is true the media type is
+            `text/event-stream` instead of `application/json`.
+          headers:
+            X-Canonn-AI-Generated:
+              description: Always `true`.
+              schema:
+                type: string
+            X-Canonn-Files:
+              description: Streams grounded on files only. Comma-separated file ids.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatCompletion'
+              examples:
+                grounded:
+                  value:
+                    id: chatcmpl-84af4cb938563908
+                    object: chat.completion
+                    created: 1790572843
+                    model: canonn-r1
+                    choices:
+                      - index: 0
+                        message:
+                          role: assistant
+                          content: 45 days from purchase.
+                        finish_reason: stop
+                        logprobs: null
+                    usage:
+                      prompt_tokens: 47
+                      completion_tokens: 7
+                      total_tokens: 54
+                    canonn:
+                      ai_generated: true
+                      generator: canonn-r1
+                      provider: Canonn
+                      generated_at: '2026-09-28T05:20:43.000Z'
+                      standard: EU AI Act Art. 50(2)
+            text/event-stream:
+              schema:
+                type: string
+              examples:
+                stream:
+                  value: >
+                    data:
+                    {"id":"chatcmpl-8a4413e02fea2712","object":"chat.completion.chunk","created":1790572881,"model":"canonn-r1","choices":[{"index":0,"delta":{"content":"The"},"finish_reason":null}]}
+
+
+                    data:
+                    {"id":"chatcmpl-8a4413e02fea2712","object":"chat.completion.chunk","created":1790572881,"model":"canonn-r1","choices":[{"index":0,"delta":{"content":""},"finish_reason":"stop"}],"usage":{"prompt_tokens":45,"completion_tokens":30,"total_tokens":75}}
+
+
+                    data: [DONE]
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '404':
+          $ref: '#/components/responses/ModelNotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '502':
+          $ref: '#/components/responses/UpstreamUnavailable'
+  /models:
+    get:
+      tags:
+        - Models
+      operationId: listModels
+      summary: List available models
+      description: Returns the OpenAI-compatible model identifiers available to the authenticated API key.
+      responses:
+        '200':
+          description: The models this key can address.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    type: string
+                    const: list
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Model'
+              example:
+                object: list
+                data:
+                  - id: canonn-r1
+                    object: model
+                    created: 1785196800
+                    owned_by: canonn
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /models/{model_id}:
+    get:
+      tags:
+        - Models
+      operationId: retrieveModel
+      summary: Retrieve a model
+      description: >-
+        What the OpenAI SDKs' `models.retrieve` calls. `canonn-r1` and its
+        alias `canonn/canonn-r1` (URL-encoded) return the model; any other id
+        is a 404 with code `model_not_found`.
+      parameters:
+        - name: model_id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: canonn-r1
+      responses:
+        '200':
+          description: The model.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Model'
+              example:
+                id: canonn-r1
+                object: model
+                created: 1785196800
+                owned_by: canonn
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/ModelNotFound'
+  /models/catalog:
+    get:
+      tags:
+        - Models
+      operationId: getModelCatalog
+      summary: Model catalog with pricing
+      description: |
+        Public and unauthenticated. Returns the machine-readable catalog used by
+        aggregators and marketplaces: context length, modalities, supported
+        parameters and per-token prices in USD.
+      security: []
+      responses:
+        '200':
+          description: Catalog entry per served model.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CatalogModel'
+              example:
+                data:
+                  - id: canonn-r1
+                    name: Canonn R1
+                    created: 1785196800
+                    description: >-
+                      A 9B model fine-tuned for context faithfulness: it answers
+                      from the documents it is given and says so when the answer
+                      is absent. The API flags contradictions (a conflict check in
+                      front of the model). Benchmarks: canonn.ai/benchmark
+                    input_modalities:
+                      - text
+                    output_modalities:
+                      - text
+                    context_length: 16384
+                    max_output_length: 4096
+                    pricing:
+                      prompt: '0.00000025'
+                      completion: '0.000001'
+                      image: '0'
+                      request: '0'
+                    quantization: bf16
+                    hugging_face_id: null
+                    supported_sampling_parameters:
+                      - temperature
+                      - top_p
+                      - max_tokens
+                      - stop
+                      - seed
+                    supported_features:
+                      - streaming
+                      - json_mode
+                      - structured_outputs
+                    datacenters:
+                      - country_code: CA
+                    is_ready: true
+                    is_free: false
+  /files:
+    post:
+      tags:
+        - Files
+      operationId: createFile
+      summary: Upload or import a knowledge file
+      description: >-
+        Uploads a document to ground chat completions on. Accepts
+        multipart/form-data with a `file` field (OpenAI-compatible) or
+        `application/json` with `filename` and `content`. Supported: plain
+        text, Markdown, JSON (one passage per record), HTML. Max 1 MB per
+        uploaded file, 100 files per account, 30 uploads an hour.
+
+
+        A JSON body may instead name a source the server fetches: `url` (with
+        optional `crawl`), `sitemap`, `feed`, `zendesk`, `helpcenter`,
+        `github`, `postgres`, `mysql` or `rest`. Web imports add `found` and
+        `records` to the response.
+
+
+        The file answers at once from a size-based first cut; the model then
+        re-cuts it in the background (`chunking`: `pending`, `working`, then
+        `model`, `partial` or `heuristic`).
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                purpose:
+                  type: string
+                  example: assistants
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FileSourceRequest'
+            examples:
+              text:
+                summary: Text you extracted yourself
+                value:
+                  filename: faq.txt
+                  content: 'Q: What is the refund window? A: 45 days from purchase.'
+              url:
+                summary: One public page
+                value:
+                  url: https://canonn.ai/about/
+      responses:
+        '200':
+          description: The stored file.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/File'
+              example:
+                id: file-2da93b04d430cc5e52d1ef9b
+                object: file
+                purpose: assistants
+                filename: policy.md
+                bytes: 365
+                created_at: 1790572907
+                status: processed
+                chunk_count: 1
+                chunking: pending
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+    get:
+      tags:
+        - Files
+      operationId: listFiles
+      summary: List knowledge files
+      description: Lists every knowledge file on the account, newest first.
+      responses:
+        '200':
+          description: Files owned by the key's account.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [object, data]
+                properties:
+                  object: { type: string, const: list }
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/File' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /files/preview:
+    post:
+      tags:
+        - Files
+      operationId: previewDatabaseSource
+      summary: Preview a database source
+      description: >-
+        With the same `postgres` or `mysql` body as POST /files, returns the
+        first 5 rows; with `"tables": true` inside the `postgres` or `mysql`
+        object, lists the tables with row counts and columns. Nothing is
+        stored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                postgres:
+                  $ref: '#/components/schemas/SqlSource'
+                mysql:
+                  $ref: '#/components/schemas/SqlSource'
+      responses:
+        '200':
+          description: Preview rows, or the table list.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /files/{file_id}:
+    get:
+      tags:
+        - Files
+      operationId: retrieveFile
+      summary: Retrieve a file's metadata
+      description: Returns metadata and chunking state for one file on the account.
+      parameters:
+        - $ref: '#/components/parameters/FileId'
+      responses:
+        '200':
+          description: The file.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/File'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags:
+        - Files
+      operationId: deleteFile
+      summary: Delete a file and its passages
+      description: Permanently removes the file and all passages derived from it.
+      parameters:
+        - $ref: '#/components/parameters/FileId'
+      responses:
+        '200':
+          description: Deletion confirmation.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, object, deleted]
+                properties:
+                  id: { type: string }
+                  object: { type: string, const: file }
+                  deleted: { type: boolean, const: true }
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /files/{file_id}/content:
+    get:
+      tags:
+        - Files
+      operationId: downloadFileContent
+      summary: Download the file's extracted text
+      description: Returns plain text reconstructed from the file's stored passages.
+      parameters:
+        - $ref: '#/components/parameters/FileId'
+      responses:
+        '200':
+          description: Plain-text content reconstructed from the stored passages.
+          content:
+            text/plain:
+              schema: { type: string }
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /files/{file_id}/chunks:
+    get:
+      tags:
+        - Files
+      operationId: listFileChunks
+      summary: List a file's passages
+      description: >-
+        The passages as retrieval sees them, with the context line the model
+        wrote for each and how each was cut (`judge`, `heuristic` or `record`).
+      parameters:
+        - $ref: '#/components/parameters/FileId'
+      responses:
+        '200':
+          description: The file's passages in order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChunkList'
+              example:
+                object: list
+                file_id: file-2da93b04d430cc5e52d1ef9b
+                filename: policy.md
+                chunking: model
+                chunking_at: 1790572911
+                chunk_count: 1
+                data:
+                  - ordinal: 0
+                    method: judge
+                    context: 'HarborPay pricing policy - pricing policy: HarborPay charges 2.9% plus 30 cents per card transaction, with a 2026 note of 3.1%.'
+                    text: "# HarborPay pricing policy\n\nHarborPay charges 2.9% plus 30 cents per card transaction.\n\nInternational cards add 1.5%."
+                    chars: 492
+                    n_tokens: 66
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /audits:
+    post:
+      tags:
+        - Audits
+      operationId: createAudit
+      summary: Audit a knowledge file
+      description: >-
+        Finds statements in one file that contradict each other or have gone
+        out of date. Returns at once with 202; poll GET /audits/{audit_id}
+        until `status` is `done`. Instead of `file_id`, the body may name a
+        source to import first (`url` with optional `crawl`, `sitemap` or
+        `zendesk`); the imported file stays on the account. 5 audits a day
+        per account.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                file_id: { type: string }
+                url: { type: string }
+                crawl: { type: boolean }
+                sitemap: { type: string }
+                zendesk: { type: string }
+            example:
+              file_id: file-2da93b04d430cc5e52d1ef9b
+      responses:
+        '202':
+          description: The audit was created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  file_id: { type: string }
+                  status: { type: string, enum: [judging, done] }
+                  chunks: { type: integer }
+                  claims: { type: integer }
+                  candidates: { type: integer }
+              example:
+                id: audit-f2aa302029e45b6d7026
+                file_id: file-2da93b04d430cc5e52d1ef9b
+                status: done
+                chunks: 1
+                claims: 4
+                candidates: 0
+        '400':
+          $ref: '#/components/responses/FlatBadRequest'
+        '401':
+          $ref: '#/components/responses/FlatUnauthorized'
+        '404':
+          $ref: '#/components/responses/FlatNotFound'
+        '429':
+          $ref: '#/components/responses/FlatRateLimited'
+    get:
+      tags:
+        - Audits
+      operationId: listAudits
+      summary: List audits
+      description: The account's 50 most recent audits, without reports.
+      responses:
+        '200':
+          description: Audits, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { type: string, const: list }
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Audit' }
+        '401':
+          $ref: '#/components/responses/FlatUnauthorized'
+  /audits/{audit_id}:
+    get:
+      tags:
+        - Audits
+      operationId: retrieveAudit
+      summary: Retrieve an audit
+      description: Progress, and once `status` is `done`, the report.
+      parameters:
+        - name: audit_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The audit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Audit'
+              example:
+                id: audit-f2aa302029e45b6d7026
+                object: audit
+                file_id: file-2da93b04d430cc5e52d1ef9b
+                source: policy.md
+                status: done
+                stage: no measurable claims disagree
+                chunks: 1
+                claims: 4
+                candidates: 0
+                judged: 0
+                progress: 1
+                created_at: 1790572956
+                updated_at: 1790572956
+                report:
+                  judge: canonn-r1
+                  chunks: 1
+                  claims: 4
+                  candidates: 0
+                  conflicts: 0
+                  stale: 0
+                  items: []
+        '401':
+          $ref: '#/components/responses/FlatUnauthorized'
+        '404':
+          $ref: '#/components/responses/FlatNotFound'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: A Canonn API key, created in the dashboard (`canonn-sk-...`).
+  parameters:
+    FileId:
+      name: file_id
+      in: path
+      required: true
+      schema:
+        type: string
+        example: file-2da93b04d430cc5e52d1ef9b
+  responses:
+    BadRequest:
+      description: Malformed request body, or a parameter canonn-r1 does not support.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalid_json:
+              value:
+                error:
+                  message: invalid json
+                  type: invalid_request_error
+                  param: null
+                  code: null
+            unsupported:
+              value:
+                error:
+                  message: tools are not supported by canonn-r1 yet
+                  type: invalid_request_error
+                  param: tools
+                  code: unsupported_parameter
+    Unauthorized:
+      description: Missing, malformed, or revoked API key.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              message: invalid api key
+              type: authentication_error
+              param: null
+              code: invalid_api_key
+    PaymentRequired:
+      description: |
+        The free requests are spent and the account has no credits. Add
+        credits in the dashboard to continue. The body adds a `free_tier`
+        object with the account's limits.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ModelNotFound:
+      description: A model other than canonn-r1.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              message: The model 'gpt-4o' does not exist. Use 'canonn-r1'.
+              type: invalid_request_error
+              param: model
+              code: model_not_found
+    NotFound:
+      description: No such file on the account.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              message: file not found
+              type: invalid_request_error
+              param: null
+              code: not_found
+    TooLarge:
+      description: An uploaded file over 1 MB.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RateLimited:
+      description: |
+        More than 120 chat completions a minute on one key (code
+        `rate_limit_exceeded`), more than 30 uploads an hour, or every serving
+        node busy (code `capacity`, with `Retry-After: 2`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    UpstreamUnavailable:
+      description: The model could not be reached. Retry; requests are not billed.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    FlatBadRequest:
+      description: Malformed body or no source named.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/FlatError'
+          example:
+            error: file_id, zendesk, sitemap or url is required
+    FlatUnauthorized:
+      description: Missing, malformed, or revoked API key.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/FlatError'
+          example:
+            error: invalid API key
+    FlatNotFound:
+      description: No such file or audit on the account.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/FlatError'
+          example:
+            error: audit not found
+    FlatRateLimited:
+      description: More than 5 audits in a day.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/FlatError'
+          example:
+            error: audit limit reached (5 a day)
+  schemas:
+    Error:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required: [message, type, param, code]
+          properties:
+            message:
+              type: string
+            type:
+              type: string
+              description: invalid_request_error, authentication_error, insufficient_quota, rate_limit_error or server_error.
+            param:
+              type: [string, 'null']
+            code:
+              type: [string, 'null']
+    FlatError:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+    Message:
+      type: object
+      required:
+        - role
+        - content
+      properties:
+        role:
+          type: string
+          enum:
+            - system
+            - user
+            - assistant
+          description: |
+            Put the documents to answer from in the `system` message and the
+            question in the `user` message.
+        content:
+          type: string
+    ChatCompletionRequest:
+      type: object
+      required:
+        - messages
+      properties:
+        model:
+          type: string
+          default: canonn-r1
+          description: |
+            `canonn-r1` (the alias `canonn/canonn-r1` also works). Omitted means
+            canonn-r1; any other name is a 404 with code `model_not_found`.
+        messages:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/Message'
+        stream:
+          type: boolean
+          default: false
+          description: Return server-sent events instead of a single JSON body.
+        stream_options:
+          type: object
+          properties:
+            include_usage:
+              type: boolean
+              description: Adds OpenAI's separate final usage chunk.
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+          default: 0.2
+          description: Set 0 for extraction work; higher values only add variance.
+        max_tokens:
+          type: integer
+          minimum: 1
+          maximum: 4096
+          default: 1024
+          description: Values above 4096 are lowered to 4096.
+        top_p:
+          type: number
+          minimum: 0
+          maximum: 1
+        stop:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+        seed:
+          type: integer
+        response_format:
+          type: object
+          description: '`{"type": "json_object"}` or `{"type": "json_schema", ...}`, as in the OpenAI API.'
+        files:
+          description: >-
+            Ground the answer on uploaded knowledge files: an array of up to 20
+            file ids, or `true` for every file on the account. The server
+            retrieves the most relevant passages and builds the grounded prompt;
+            the response's `canonn.citations` names them.
+          oneOf:
+            - type: boolean
+            - type: array
+              maxItems: 20
+              items:
+                type: string
+        retrieval:
+          type: object
+          description: Retrieval tuning when `files` is set.
+          properties:
+            top_k:
+              type: integer
+              default: 8
+              maximum: 40
+            budget:
+              type: integer
+              default: 12000
+              maximum: 60000
+              description: Max characters of retrieved data placed in front of the model.
+        canonn:
+          type: boolean
+          default: false
+          description: 'Streams only. Adds a `data: {"canonn": {...}}` event before `[DONE]`.'
+        tools:
+          description: Not supported. A non-empty list is a 400 with code `unsupported_parameter`.
+        logprobs:
+          description: Not supported. `true` is a 400 with code `unsupported_parameter`.
+        n:
+          description: Ignored. Every request returns one choice.
+    Choice:
+      type: object
+      properties:
+        index:
+          type: integer
+        message:
+          $ref: '#/components/schemas/Message'
+        finish_reason:
+          type: string
+          enum:
+            - stop
+            - length
+          description: |
+            `length` means the answer was cut off by `max_tokens`. Raise it and
+            retry rather than shipping a truncated answer.
+        logprobs:
+          type: 'null'
+    Usage:
+      type: object
+      properties:
+        prompt_tokens:
+          type: integer
+        completion_tokens:
+          type: integer
+        total_tokens:
+          type: integer
+    Citation:
+      type: object
+      properties:
+        file_id:
+          type: string
+        filename:
+          type: string
+        ordinal:
+          type: integer
+          description: The passage's position in the file, as in GET /files/{file_id}/chunks.
+        score:
+          type: number
+        excerpt:
+          type: string
+          description: The first 400 characters of the passage, context line included.
+    CanonnExtras:
+      type: object
+      description: Canonn's additions to a completion. OpenAI SDKs ignore the field.
+      properties:
+        route:
+          type: object
+          description: |
+            Present when the router ran (data between 300 and 60,000
+            characters). `p` is null when the router could not be reached and
+            the default expert answered. `p_absent` is present when the check on
+            whether the data contains the answer ran.
+          properties:
+            route:
+              type: string
+              enum: [default, conflict, injection, absent]
+            p:
+              type: [object, 'null']
+              properties:
+                default: { type: number }
+                conflict: { type: number }
+                injection: { type: number }
+            p_absent:
+              type: number
+              description: Probability that the data does not contain the answer.
+        conflict:
+          type: object
+          description: Present when the router or the conflict check ran.
+          properties:
+            p:
+              type: number
+              description: Probability that the data contradicts itself on this question.
+            flagged:
+              type: boolean
+              description: Whether the answer was sent down the conflict path.
+        files:
+          type: array
+          items:
+            type: string
+        citations:
+          type: array
+          items:
+            $ref: '#/components/schemas/Citation'
+        ai_generated:
+          type: boolean
+        generator:
+          type: string
+        provider:
+          type: string
+        generated_at:
+          type: string
+          format: date-time
+        standard:
+          type: string
+          example: EU AI Act Art. 50(2)
+    ChatCompletion:
+      type: object
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          const: chat.completion
+        created:
+          type: integer
+          description: Unix seconds.
+        model:
+          type: string
+        choices:
+          type: array
+          items:
+            $ref: '#/components/schemas/Choice'
+        usage:
+          $ref: '#/components/schemas/Usage'
+        canonn:
+          $ref: '#/components/schemas/CanonnExtras'
+    Model:
+      type: object
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          const: model
+        created:
+          type: integer
+        owned_by:
+          type: string
+    CatalogModel:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        created:
+          type: integer
+        description:
+          type: string
+        input_modalities:
+          type: array
+          items:
+            type: string
+        output_modalities:
+          type: array
+          items:
+            type: string
+        context_length:
+          type: integer
+        max_output_length:
+          type: integer
+        pricing:
+          type: object
+          description: USD per token, as strings.
+          properties:
+            prompt:
+              type: string
+            completion:
+              type: string
+            image:
+              type: string
+            request:
+              type: string
+        quantization:
+          type: string
+        hugging_face_id:
+          type:
+            - string
+            - 'null'
+        supported_sampling_parameters:
+          type: array
+          items:
+            type: string
+        supported_features:
+          type: array
+          items:
+            type: string
+        datacenters:
+          type: array
+          items:
+            type: object
+            properties:
+              country_code:
+                type: string
+                description: ISO 3166-1 alpha-2
+        is_ready:
+          type: boolean
+        is_free:
+          type: boolean
+    SqlSource:
+      type: object
+      properties:
+        connection_string:
+          type: string
+        query:
+          type: string
+        table:
+          type: object
+          properties:
+            schema: { type: string }
+            name: { type: string }
+        tables:
+          type: boolean
+    FileSourceRequest:
+      type: object
+      description: Exactly one source.
+      properties:
+        filename:
+          type: string
+        content:
+          type: string
+        url:
+          type: string
+        crawl:
+          type: boolean
+        sitemap:
+          type: string
+        feed:
+          type: string
+        zendesk:
+          type: string
+          example: support.acme.com
+        helpcenter:
+          type: object
+          properties:
+            provider:
+              type: string
+              enum: [intercom, helpscout, hubspot]
+            url:
+              type: string
+        github:
+          type: string
+          example: owner/repo
+        postgres:
+          $ref: '#/components/schemas/SqlSource'
+        mysql:
+          $ref: '#/components/schemas/SqlSource'
+        rest:
+          type: object
+          properties:
+            url:
+              type: string
+            authorization:
+              type: string
+    File:
+      type: object
+      properties:
+        id:
+          type: string
+          example: file-2da93b04d430cc5e52d1ef9b
+        object:
+          type: string
+          example: file
+        purpose:
+          type: string
+          example: assistants
+        filename:
+          type: string
+        bytes:
+          type: integer
+        created_at:
+          type: integer
+        status:
+          type: string
+          example: processed
+        chunk_count:
+          type: integer
+          description: Retrievable passages extracted from the file.
+        chunking:
+          type: string
+          enum: [pending, working, model, partial, heuristic]
+          description: Where the model re-cut of the file stands.
+        found:
+          type: integer
+          description: Web imports only. Records the source offered.
+        records:
+          type: integer
+          description: Web imports only. Records imported.
+    ChunkList:
+      type: object
+      properties:
+        object:
+          type: string
+          const: list
+        file_id:
+          type: string
+        filename:
+          type: string
+        chunking:
+          type: string
+        chunking_at:
+          type: [integer, 'null']
+        chunk_count:
+          type: integer
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              ordinal: { type: integer }
+              method: { type: string, enum: [judge, heuristic, record] }
+              context: { type: string }
+              text: { type: string }
+              chars: { type: integer }
+              n_tokens: { type: integer }
+    Audit:
+      type: object
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          const: audit
+        file_id:
+          type: string
+        source:
+          type: string
+        status:
+          type: string
+          enum: [judging, done]
+        stage:
+          type: string
+        chunks:
+          type: integer
+        claims:
+          type: integer
+        candidates:
+          type: integer
+        judged:
+          type: integer
+        progress:
+          type: number
+        created_at:
+          type: integer
+        updated_at:
+          type: integer
+        report:
+          type: object
+          description: Present once `status` is `done` (GET /audits/{audit_id} only).
+          properties:
+            judge: { type: string }
+            chunks: { type: integer }
+            claims: { type: integer }
+            candidates: { type: integer }
+            conflicts: { type: integer }
+            stale: { type: integer }
+            possible: { type: integer }
+            items:
+              type: array
+              items:
+                type: object
+                properties:
+                  kind: { type: string, enum: [conflict, stale] }
+                  confidence: { type: string, enum: [likely, possible] }
+                  p: { type: number }
+                  topic: { type: string }
+                  a:
+                    type: object
+                    properties:
+                      ordinal: { type: integer }
+                      quote: { type: string }
+                      value: { type: string }
+                  b:
+                    type: object
+                    properties:
+                      ordinal: { type: integer }
+                      quote: { type: string }
+                      value: { type: string }
